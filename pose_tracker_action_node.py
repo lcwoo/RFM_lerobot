@@ -38,7 +38,7 @@ class PoseTrackerFoundationPose(Node):
             "foundationpose_root", os.environ.get("FOUNDATIONPOSE_ROOT", "/workspace/FoundationPose")
         ).value
         self.mesh_file = self.declare_parameter("mesh_file", "").value  # required
-        self.base_frame = self.declare_parameter("base_frame", "base_link").value
+        self.base_frame = self.declare_parameter("base_frame", "base").value
         self.camera_frame = self.declare_parameter("camera_frame", "camera_color_optical_frame").value  # empty -> use msg.header.frame_id
 
         self.depth_scale = float(self.declare_parameter("depth_scale", 0.001).value)  # uint16(mm)->m
@@ -453,15 +453,13 @@ class PoseTrackerFoundationPose(Node):
 
             T_base_obj = T_base_cam @ T_cam_obj
 
-            # publish object pose (frame_id=base_link 권장)
             self._publish_pose(self.pub_T_base_obj, self.base_frame, color_msg.header.stamp, T_base_obj)
-            self._publish_pose(self.pub_T_cam_obj, self.base_frame, color_msg.header.stamp, T_cam_obj)
+            self._publish_pose(self.pub_T_cam_obj, cam_frame, color_msg.header.stamp, T_cam_obj)
 
             # optional TF object_<id>
             if self.publish_object_tf:
                 self._broadcast_object_tf(obj_id, self.base_frame, color_msg.header.stamp, T_base_obj)
 
-            # compute + publish target tcp pose (frame_id=base_link 필수)
             T_base_tcp = self._compute_target_tcp_T(T_base_obj)
             self._publish_pose(self.pub_target_tcp, self.base_frame, color_msg.header.stamp, T_base_tcp)
 

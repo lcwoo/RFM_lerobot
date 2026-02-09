@@ -55,7 +55,7 @@ class PoseTrackerFoundationPose(Node):
 
         self.color_topic = "/wrist_cam/camera/color/image_raw"
         self.depth_topic = "/wrist_cam/camera/aligned_depth_to_color/image_raw"
-        self.instance_mask_topic = "/perception/instance_mask"
+        self.instance_mask_topic = "/perception/target_object_mask"
         self.initial_prompt = self.declare_parameter("prompt", "").value
 
         # -------- TF --------
@@ -66,13 +66,17 @@ class PoseTrackerFoundationPose(Node):
         # -------- outputs (relative to /pose_tracker namespace) --------
         self.pub_T_base_obj = self.create_publisher(PoseStamped, "/pose_tracker/T_base_obj", 10)
         self.pub_T_cam_obj = self.create_publisher(PoseStamped, "/pose_tracker/T_cam_obj", 10)
-        self.pub_target_tcp = self.create_publisher(PoseStamped, "/ur5/goal_tcp_pose_test", 10)
+        self.pub_target_tcp = self.create_publisher(PoseStamped, "/ur5/goal_tcp_pose", 10)
         self.pub_pose_vis = self.create_publisher(Image, "/pose_tracker/pose_vis", 10)  # pose visualization (overlay on RGB)
         self.pub_status = self.create_publisher(String, "/pose_tracker/status", 10)
 
-        # optional input: /pose_tracker/target_object_id
-        self.sub_target_id = self.create_subscription(Int32, "/pose_tracker/target_object_id", self._on_target_id, 10)
-        self.sub_prompt = self.create_subscription(String, "/inferece/prompt", self._on_prompt, 10)
+        # input: /inference/prompt  (typo fix)
+        self.sub_prompt = self.create_subscription(String, "/inference/prompt", self._on_prompt, 10)
+
+        # prompt/mask gating + debounce for publishing tcp
+        self._has_prompt = False
+        self._good_start_ns = None  # nanoseconds; None when not in "good streak"
+        self._good_required_ns = int(0.3 * 1e9)  # 0.3s
 
         # service: /pose_tracker/reset
         self.srv_reset = self.create_service(Trigger, "/pose_tracker/reset", self._on_reset)
@@ -84,8 +88,6 @@ class PoseTrackerFoundationPose(Node):
         # -------- FoundationPose init --------
         if self.foundationpose_root not in sys.path:
             sys.path.insert(0, self.foundationpose_root)
-        sys.path.insert(0, os.path.join(self.foundationpose_root, "mycpp", "build"))
-        sys.path.insert(0, os.path.join(self.foundationpose_root, "mycpp"))
         os.chdir(self.foundationpose_root)
         
         import torch
@@ -138,7 +140,7 @@ class PoseTrackerFoundationPose(Node):
             f"  Sub color: {self.color_topic}\n"
             f"  Sub depth: {self.depth_topic}\n"
             f"  Sub mask : {self.instance_mask_topic}\n"
-            f"  Pub /pose_tracker/T_base_obj, /pose_tracker/T_cam_obj, /ur5/goal_tcp_pose_test, /pose_tracker/status\n"
+            f"  Pub /pose_tracker/T_base_obj, /pose_tracker/T_cam_obj, /pose_tracker/goal_tcp_pose, /pose_tracker/status\n"
         )
 
         if self.initial_prompt:
@@ -203,7 +205,7 @@ class PoseTrackerFoundationPose(Node):
         parts = (prompt_text or "").strip().split()
         if len(parts) < 2:
             return None
-        return parts[1]
+        return " ".join(parts[1:]).strip()
 
     def _on_prompt(self, msg: String):
         obj_name = self._extract_object_from_prompt(msg.data)
@@ -213,6 +215,10 @@ class PoseTrackerFoundationPose(Node):
         ok = self._reset_foundation_pose_object(obj_name)
         if not ok:
             self._set_status("ERROR")
+            self._has_prompt = False
+            return
+        self._has_prompt = True
+        self._good_start_ns = None  # prompt 바뀌면 안정화 다시
 
     def _publish_status(self):
         msg = String()
@@ -223,15 +229,11 @@ class PoseTrackerFoundationPose(Node):
         if s != self.current_status:
             self.current_status = s
 
-    def _on_target_id(self, msg: Int32):
-        self.target_object_id = int(msg.data)
-        # 새 target id 지정되면 다음 프레임에서 register 다시 하도록
-        self.initialized = False
-        self._set_status("READY")
 
     def _on_reset(self, req, resp):
         self.initialized = False
         self._set_status("READY")
+        self._good_start_ns = None
         resp.success = True
         resp.message = "reset ok"
         return resp
@@ -438,6 +440,9 @@ class PoseTrackerFoundationPose(Node):
         if self.mesh is None:
             self._set_status("READY")
             return
+        # /inference/prompt & mask 모두 준비되어야 진행
+        if not self._has_prompt:
+            return
 
         with self.lock:
             if self.busy:
@@ -461,19 +466,13 @@ class PoseTrackerFoundationPose(Node):
                 self._set_status("ERROR")
                 return
 
-            # choose target id
-            obj_id = self.target_object_id
-            if obj_id <= 0:
-                obj_id = self._choose_target_id(inst)
-            if obj_id == 0:
-                self._set_status("NO_TARGET")
-                self.initialized = False
-                return
-
-            mask = (inst == obj_id)
+            # target_object_mask는 0/1(또는 0/nonzero) 단일 타겟 마스크로 가정
+            mask = (inst != 0)
+            
             if int(mask.sum()) < self.min_mask_pixels:
                 self._set_status("NO_TARGET")
                 self.initialized = False
+                self._good_start_ns = None
                 return
             K = self.K.astype(np.float64, copy=False)
             depth = depth.astype(np.float32, copy=False)
@@ -515,12 +514,19 @@ class PoseTrackerFoundationPose(Node):
             self._publish_pose(self.pub_T_base_obj, self.base_frame, color_msg.header.stamp, T_base_obj)
             self._publish_pose(self.pub_T_cam_obj, cam_frame, color_msg.header.stamp, T_cam_obj)
 
-            # optional TF object_<id>
-            self._broadcast_object_tf(obj_id, self.base_frame, color_msg.header.stamp, T_base_obj)
+            # optional TF object_<id> (단일 타겟이므로 id=1 고정)
+            self._broadcast_object_tf(1, self.base_frame, color_msg.header.stamp, T_base_obj)
 
-            if not bad:
-                T_base_tcp = self._compute_target_tcp_T(T_base_obj)
-                self._publish_pose(self.pub_target_tcp, self.base_frame, color_msg.header.stamp, T_base_tcp)
+            # bad=False가 0.3초 연속이면 그때 goal publish (debounce)
+            now_ns = int(self.get_clock().now().nanoseconds)
+            if bad:
+                self._good_start_ns = None
+            else:
+                if self._good_start_ns is None:
+                    self._good_start_ns = now_ns
+                if (now_ns - self._good_start_ns) >= self._good_required_ns:
+                    T_base_tcp = self._compute_target_tcp_T(T_base_obj)
+                    self._publish_pose(self.pub_target_tcp, self.base_frame, color_msg.header.stamp, T_base_tcp)
 
             # Visualize Estimated object 6d pos
             vis = self._make_pose_vis(rgb, mask, K, T_cam_obj)
@@ -531,6 +537,7 @@ class PoseTrackerFoundationPose(Node):
             self.get_logger().error(f"_on_synced exception: {e}\n{traceback.format_exc()}")
             self._set_status("ERROR")
             self.initialized = False
+            self._good_start_ns = None
         finally:
             with self.lock:
                 self.busy = False

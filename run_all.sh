@@ -39,13 +39,7 @@ tmux send-keys  -t "$SESSION:static_tf" \
 
 tmux new-window -t "$SESSION" -n "foundation_pose"
 tmux send-keys -t "SESSION:foundation_pose" \
-  "$COMMON_SETUP python pose_tracker_action_node.py --ros-args \
-  -r __ns:=/pose_tracker \
-  -r /pose_tracker/tf:=/tf \
-  -r /pose_tracker/tf_static:=/tf_static \
-  -p foundationpose_root:=/home/bi_admin/RFM/thirdparty/FoundationPose \
-  -p mesh_file:=/home/bi_admin/RFM/ycb/013_apple/google_16k/textured.obj \
-  -p base_frame:=base_link" C-m
+  "$COMMON_SETUP python pose_tracker_action_node.py --ros-args -p prompt:="pick apple"" C-m
 
 tmux select-window -t "$SESSION:realsense"
 tmux attach -t "$SESSION"

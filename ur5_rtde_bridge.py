@@ -8,6 +8,7 @@ Subscribes (commands):
   - /ur5/goal_tcp_pose_r   : relative TCP delta (moveL)        [geometry_msgs/PoseStamped]
   - /ur5/goal_joint        : absolute joint target (moveJ)     [sensor_msgs/JointState]
   - /ur5/goal_joint_r      : relative joint delta (moveJ)      [sensor_msgs/JointState]
+  - /ur5/gripper_cmd      : gripper command (Tool DO 0)       [std_msgs/Float64]  value>gripper_mid → open (기본 gripper_mid=0, 즉 -1=닫힘/1=열림)
   - /ur5/cmd  : where/list/save/go                [std_msgs/String]
     - where : log current TCP pose + joint angles
     - list  : log saved pose names
@@ -33,6 +34,7 @@ Pose Database format:
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence
@@ -43,7 +45,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float64, String
 from std_srvs.srv import Trigger
 
 from math_utils import quat_to_mat, mat_to_quat, mat_to_rotvec, rotvec_to_mat
@@ -64,11 +66,84 @@ class UR5RTDEBridge(Node):
         self.accel_j = float(self.declare_parameter("accel_j", 1.0).value)    # rad/s^2
 
         self.publish_rate = float(self.declare_parameter("publish_rate", 30.0).value)
+        # 그리퍼: value > gripper_mid 이면 열림(True). -1~1 범위면 0.0, 0~1 범위면 0.5 권장.
+        self.gripper_mid = float(self.declare_parameter("gripper_mid", 0.0).value)
+        # 그리퍼 반전: True면 값이 낮을수록 열림 (Gello 데이터와 반대일 때 사용)
+        self.invert_gripper = self.declare_parameter("invert_gripper", False).value
+        # 그리퍼 범위: Gello 데이터는 0.047~0.772 범위를 사용. None이면 0~1로 가정.
+        # 기본값을 Gello 데이터 범위로 설정 (자동 감지 가능하도록)
+        self.gripper_min_hw = self.declare_parameter("gripper_min_hw", 0.0471).value
+        self.gripper_max_hw = self.declare_parameter("gripper_max_hw", 0.7725).value
+        # RTDE IO: EtherNet/IP·PROFINET·MODBUS 사용 시 레지스터 충돌로 False로 끄면 그리퍼 제외하고 동작.
+        self.use_rtde_io = self.declare_parameter("use_rtde_io", True).value
+        # RobotiqGripper: RTDE IO 실패 시 자동 폴백 (gello_software 방식, Modbus TCP port 63352)
+        self.use_robotiq_gripper = self.declare_parameter("use_robotiq_gripper", True).value
 
         # ---- RTDE ----
-        import rtde_control, rtde_receive
+        import rtde_control, rtde_receive, rtde_io
         self.rtde_c = rtde_control.RTDEControlInterface(self.robot_ip)
         self.rtde_r = rtde_receive.RTDEReceiveInterface(self.robot_ip)
+        self.rtde_io = None
+        self.robotiq_gripper = None
+        
+        if self.use_rtde_io:
+            try:
+                self.rtde_io = rtde_io.RTDEIOInterface(self.robot_ip)
+                self.get_logger().info("✅ RTDE IO enabled: gripper via Tool DO 0")
+            except RuntimeError as e:
+                if "already in use" in str(e) or "RTDE" in str(e):
+                    self.get_logger().warn(
+                        "⚠️ RTDE IO unavailable (EtherNet/IP, PROFINET or MODBUS may be using registers). "
+                        "Falling back to RobotiqGripper if available."
+                    )
+                else:
+                    raise
+        else:
+            self.get_logger().info("ℹ️ use_rtde_io=false: RTDE IO disabled.")
+        
+        # RTDE IO 실패 시 RobotiqGripper 폴백
+        if self.rtde_io is None and self.use_robotiq_gripper:
+            self.get_logger().info("🔄 RTDE IO 없음. RobotiqGripper 연결 시도 중...")
+            try:
+                # ur5_rtde_bridge.py는 /home/lcw/RFM/에 있으므로, 같은 디렉터리의 gello_software를 찾음
+                gello_path = Path(__file__).resolve().parent / "gello_software"
+                self.get_logger().info(f"📁 gello_software 경로 확인: {gello_path}")
+                if gello_path.exists():
+                    sys.path.insert(0, str(gello_path))
+                    self.get_logger().info("📦 RobotiqGripper 모듈 import 시도...")
+                    from gello.robots.robotiq_gripper import RobotiqGripper
+                    self.get_logger().info(f"🔌 RobotiqGripper 연결 시도: {self.robot_ip}:63352")
+                    self.robotiq_gripper = RobotiqGripper()
+                    self.robotiq_gripper.connect(hostname=self.robot_ip, port=63352)
+                    self.get_logger().info("✅ RobotiqGripper connected (Modbus TCP port 63352)")
+                    
+                    # 그리퍼 활성화 (필수!)
+                    try:
+                        self.get_logger().info("🔄 RobotiqGripper 활성화 중...")
+                        self.robotiq_gripper.activate(auto_calibrate=False)  # 자동 캘리브레이션은 시간이 오래 걸리므로 비활성화
+                        if self.robotiq_gripper.is_active():
+                            self.get_logger().info("✅ RobotiqGripper 활성화 완료")
+                        else:
+                            self.get_logger().warn("⚠️ RobotiqGripper 활성화 실패 (상태 확인 필요)")
+                    except Exception as e:
+                        self.get_logger().warn(f"⚠️ RobotiqGripper 활성화 중 오류 (계속 진행): {e}")
+                else:
+                    self.get_logger().error(f"❌ gello_software 경로 없음: {gello_path}. RobotiqGripper 사용 불가.")
+            except ImportError as e:
+                self.get_logger().error(f"❌ RobotiqGripper 모듈 import 실패: {e}")
+                import traceback
+                self.get_logger().error(traceback.format_exc())
+                self.robotiq_gripper = None
+            except Exception as e:
+                self.get_logger().error(f"❌ RobotiqGripper 연결 실패: {e}")
+                self.get_logger().error(f"   확인: Robotiq 그리퍼가 {self.robot_ip}:63352에 연결되어 있는지 확인하세요.")
+                import traceback
+                self.get_logger().error(traceback.format_exc())
+                self.robotiq_gripper = None
+        elif self.rtde_io is not None:
+            self.get_logger().info("ℹ️ RTDE IO 사용 중. RobotiqGripper 폴백 비활성화.")
+        elif not self.use_robotiq_gripper:
+            self.get_logger().info("ℹ️ use_robotiq_gripper=false. RobotiqGripper 비활성화.")
 
         # ---- state (thread-safe) ----
         self._state_lock = threading.Lock()
@@ -106,6 +181,9 @@ class UR5RTDEBridge(Node):
         # /ur5/cmd 토픽을 구독하여 _on_cmd 함수에서 명령어를 처리합니다.
         self.sub_cmd = self.create_subscription(String, "/ur5/cmd", self._on_cmd, 10)
 
+        # /ur5/gripper_cmd (Float64): 값 > 0.5 → Tool Digital Out 0 = True(열림), 아니면 False(닫힘). scripts/gripper_toy.py 가 사용.
+        self.sub_gripper = self.create_subscription(Float64, "/ur5/gripper_cmd", self._on_gripper_cmd, 10)
+
         # ---- periodic publish ----
         # rate가 50이라면 1초에 50번 _publish_state 함수가 호출되어 현재 TCP 위치와 실행 상태를 발행합니다.
         if self.publish_rate > 0:
@@ -116,7 +194,7 @@ class UR5RTDEBridge(Node):
             f"moveL: speed_l={self.speed_l}, accel_l={self.accel_l} | "
             f"moveJ: speed_j={self.speed_j}, accel_j={self.accel_j}"
         )
-        self.get_logger().info("Subscribing: /ur5/goal_tcp_pose, /ur5/goal_tcp_pose_r, /ur5/goal_joint, /ur5/goal_joint_r")
+        self.get_logger().info("Subscribing: /ur5/goal_tcp_pose, /ur5/goal_tcp_pose_r, /ur5/goal_joint, /ur5/goal_joint_r, /ur5/gripper_cmd")
         self.get_logger().info("Cmd topic: /ur5/cmd (where/list/save/go)")
         self.get_logger().info("Publishing: /ur5/tcp_pose, /ur5/status")
 
@@ -237,6 +315,69 @@ class UR5RTDEBridge(Node):
             return
 
         self.get_logger().warn("Unknown command. supported: where, list, save <name>, go <name>")
+
+    # --------------------
+    # gripper_cmd: Tool Digital Out 0 (값 > 0.5 → True)
+    # --------------------
+    def _on_gripper_cmd(self, msg: Float64):
+        v = float(msg.data)
+        # 반전 옵션 적용
+        if self.invert_gripper:
+            # Gello 데이터 범위를 반전: 높은 값(열림) → 낮은 값으로 변환
+            # 예: 0.0471~0.7725 → 0.7725~0.0471로 반전
+            # 하지만 run_policy_ur5.py에서 이미 스케일링하므로 여기서는 단순히 1.0 - v로 반전
+            v = 1.0 - v
+        # value > gripper_mid → 열림(True). gripper_mid=0 이면 -1(닫힘)/1(열림) 범위, 0.5면 0~1 범위.
+        is_open = v > self.gripper_mid
+        
+        # RTDE IO 우선 시도
+        if self.rtde_io is not None:
+            try:
+                self.rtde_io.setToolDigitalOut(0, is_open)
+                self.get_logger().info(f"gripper_cmd: {v:.3f} → Tool DO 0 = {is_open}")
+                return
+            except Exception as e:
+                self.get_logger().warn(f"RTDE IO gripper_cmd 실패: {e}")
+        
+        # RobotiqGripper 폴백
+        if self.robotiq_gripper is not None:
+            try:
+                # v: Gello 데이터 형식 (0.047~0.772 범위 또는 0~1 범위, 높을수록 열림)
+                # RobotiqGripper: 0=닫힘, 255=열림
+                # 반전 옵션이 이미 적용된 v를 0~255로 변환
+                
+                # 범위 정규화: gripper_min_hw/max_hw가 설정되어 있으면 해당 범위로 정규화
+                if self.gripper_min_hw is not None and self.gripper_max_hw is not None:
+                    # v가 이미 하드웨어 범위(예: 0.047~0.772)로 스케일링되어 있음
+                    # 이를 0~1로 정규화한 후 0~255로 변환
+                    v_normalized = (v - self.gripper_min_hw) / (self.gripper_max_hw - self.gripper_min_hw)
+                    v_normalized = max(0.0, min(1.0, v_normalized))  # 클리핑
+                    pos = int(v_normalized * 255)
+                else:
+                    # 기본: v를 0~1 범위로 가정하고 0~255로 변환
+                    if v < 0:
+                        pos = 0  # 닫힘
+                    elif v > 1:
+                        pos = 255  # 열림
+                    else:
+                        pos = int(v * 255)
+                
+                pos = max(0, min(255, pos))  # 최종 클리핑
+                
+                self.robotiq_gripper.move(pos, 255, 10)  # (position, speed, force)
+                invert_str = " (반전됨)" if self.invert_gripper else ""
+                range_str = f" [{self.gripper_min_hw:.3f}~{self.gripper_max_hw:.3f}]" if self.gripper_min_hw is not None else ""
+                self.get_logger().info(f"gripper_cmd: {msg.data:.3f} → RobotiqGripper pos={pos}{invert_str}{range_str}")
+                return
+            except Exception as e:
+                self.get_logger().warn(f"RobotiqGripper gripper_cmd 실패: {e}")
+        
+        # 둘 다 실패
+        self.get_logger().warn(
+            f"gripper_cmd 수신했지만 그리퍼 제어 불가. "
+            f"rtde_io={'None' if self.rtde_io is None else 'OK'}, "
+            f"robotiq_gripper={'None' if self.robotiq_gripper is None else 'OK'}"
+        )
 
     def _go_saved_joint(self, name: str):
         key = name.lower()
@@ -454,6 +595,7 @@ class UR5RTDEBridge(Node):
         if q is None:
             self.get_logger().warn("/ur5/goal_joint requires JointState.position with 6 values.")
             return
+        self.get_logger().info(f"📥 /ur5/goal_joint 수신: {[f'{v:.3f}' for v in q]} → moveJ 실행")
         self._start_motion(lambda: self.rtde_c.moveJ(q, speed=self.speed_j, acceleration=self.accel_j),
                            busy_msg="Robot is moving. Ignore /ur5/goal_joint.")
 

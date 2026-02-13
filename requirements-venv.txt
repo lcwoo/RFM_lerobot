@@ -1,0 +1,3 @@
+# RFM venv 전용 추가 패키지 (LeRobot은 scripts/setup_venv.sh에서 -e ./lerobot 로 설치)
+# UR5 RTDE 제어
+ur-rtde

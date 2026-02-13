@@ -1,0 +1,77 @@
+# RFM venv + UR5 명령어 정리
+
+## 0. gello_software 설치 (텔레오퍼레이션·데이터 수집)
+# 이미 설치됨: /home/lcw/RFM/gello_software (https://github.com/wuphilipp/gello_software)
+# 가상환경: gello_software 전용 .venv (Python 3.10)
+cd /home/lcw/RFM/gello_software
+source .venv/bin/activate
+
+# UR 로봇 + 데이터 저장 인터페이스로 실행 (저장: s, 종료: q)
+# YAM이 아닌 경우: 먼저 로봇 노드 실행 후 run_env.py
+python experiments/run_env.py --agent=gello --use-save-interface
+
+# YAM + YAML 설정인 경우 (데이터 저장 포함)
+# python experiments/launch_yaml.py --left-config-path configs/yam_passive.yaml --use-save-interface
+
+# 저장 데이터는 gello_software/data/ 에 생성됨. RFM 변환 스크립트용으로 쓰려면:
+#   ln -sf /home/lcw/RFM/gello_software/data /home/lcw/RFM/gello_data
+#   또는 변환 시 --input /home/lcw/RFM/gello_software/data 지정
+
+## 1. venv 활성화
+cd /home/lcw/RFM && source .venv/bin/activate
+
+## 2. UR5 작동시키기 (ROS2 필요)
+# 먼저 ROS2 source (한 터미널 세션당 한 번)
+source /opt/ros/humble/setup.bash
+
+# 그 다음 venv 활성화
+cd /home/lcw/RFM && source .venv/bin/activate
+
+# UR5 RTDE 브리지 실행 (로봇 IP는 기본 192.168.0.43)
+python ur5_rtde_bridge.py
+
+# 또는 ros2 run으로 실행하는 경우
+# ros2 run <패키지명> <노드명>
+
+## 3. 한 번에 복사해서 쓸 때 (venv만)
+cd /home/lcw/RFM && source venv/bin/activate
+
+## 4. 한 번에 복사해서 쓸 때 (UR5 브리지 실행까지)
+source /opt/ros/humble/setup.bash && cd /home/lcw/RFM && source venv/bin/activate && python ur5_rtde_bridge.py
+
+## 5. Gello to LeRobot 데이터셋 변환 (dataset/eggplant)
+# v3.0 포맷으로 meta/info.json, meta/stats.json, meta/tasks.parquet, meta/episodes/ 가 생성됨 (episodes.jsonl 등 레거시 .jsonl 불필요)
+# --task 에 넣은 문구가 데이터셋의 "명령"으로 저장됨 (task-conditioned 학습용)
+# 기존 dataset 삭제 후 변환
+rm -rf /home/lcw/RFM/datasets/eggplant
+cd /home/lcw/RFM && source venv/bin/activate
+python scripts/convert_gello_to_lerobot.py \
+  --input /home/lcw/RFM/gello_data \
+  --output /home/lcw/RFM/datasets/eggplant \
+  --fps 30 \
+  --task "Pick up the eggplant and place it on the plate."
+
+## 6. LeRobot 학습 (로컬 데이터셋: datasets/eggplant, 카메라 1개 → SmolVLA 3카메라 기대 대응)
+# 데이터셋은 observation.images.wrist 1개뿐 → rename_map으로 camera1로 이름 맞춤, empty_cameras=2로 나머지 2개는 빈 이미지
+# 체크포인트: 기본 save_freq=20000 (2만 step마다 + 마지막 step). 더 자주 저장하려면 --save_freq=5000 등 추가
+cd /home/lcw/RFM && source venv/bin/activate
+lerobot-train \
+  --policy.path=lerobot/smolvla_base \
+  --dataset.repo_id=eggplant \
+  --dataset.root=/home/lcw/RFM/datasets/eggplant \
+  --rename_map='{"observation.images.wrist":"observation.images.camera1"}' \
+  --policy.empty_cameras=2 \
+  --batch_size=64 \
+  --steps=20000 \
+  --save_freq=5000 \
+  --output_dir=outputs/train/eggplant \
+  --job_name=eggplant_0209 \
+  --policy.device=cuda \
+  --wandb.enable=true \
+  --policy.push_to_hub=false
+
+
+
+
+
+  

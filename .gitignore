@@ -1,8 +1,47 @@
+# RFM 프로젝트 루트 – 현재 환경 공통
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ROS2 / colcon (rfm 패키지)
+rfm/install/
+rfm/build/
+rfm/log/
+rfm/weights/
+
+# 프로젝트별 백업/대용량
 _backup_thirdparty
 ycb/
-__pycache__/
-rfm/install
-rfm/build
-rfm/log
-rfm/weights
 
+# 학습/실험 출력 (octo, lerobot 등)
+outputs/
+wandb/
+
+# 로컬 데이터셋 (대용량이면 아래 주석 해제)
+# datasets/
+# lerobot_data/
+# gello_data/   # Gello pkl 원본 (RFM/gello_data)
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# 기타
+*.log
+.Python
+# ignore nested local envs
+gello_software/.venv/

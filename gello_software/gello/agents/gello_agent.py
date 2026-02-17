@@ -77,6 +77,20 @@ PORT_CONFIG_MAP: Dict[str, DynamixelRobotConfig] = {
             24,
         ),  # Reversed: now starts open (-30) and closes on press (24)
     ),
+    # Gello (FTA2U0V8) — gello_get_offset.py 캘리브레이션 결과 반영 (start-joints 0,0,0,0,0,0 / signs 1,1,-1,1,1,1)
+    "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA2U0V8-if00-port0": DynamixelRobotConfig(
+        joint_ids=(1, 2, 3, 4, 5, 6),
+        joint_offsets=(
+            3 * np.pi / 2,
+            4 * np.pi / 2,
+            1 * np.pi / 2,
+            4 * np.pi / 2,
+            3 * np.pi / 2,
+            1 * np.pi / 2,
+        ),
+        joint_signs=(1, 1, -1, 1, 1, 1),
+        gripper_config=(7, 26.34, -15.46),
+    ),
     # Left UR
     "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7WBEIA-if00-port0": DynamixelRobotConfig(
         joint_ids=(1, 2, 3, 4, 5, 6),

@@ -30,7 +30,9 @@ outputs/
 wandb/
 
 # 로컬 데이터셋 (대용량이면 아래 주석 해제)
-# datasets/
+datasets/
+lerobot/
+octo/
 # lerobot_data/
 # gello_data/   # Gello pkl 원본 (RFM/gello_data)
 

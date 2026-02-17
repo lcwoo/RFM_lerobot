@@ -96,6 +96,10 @@ class UR5RTDEBridge(Node):
         # RobotiqGripper fallback (Modbus TCP on port 63352). Activates automatically
         # when RTDE IO is unavailable and this parameter is True.
         self.use_robotiq_gripper = self.declare_parameter("use_robotiq_gripper", True).value
+        
+        # Force RobotiqGripper even when RTDE IO is available (useful when RTDE IO
+        # doesn't actually control the gripper hardware)
+        self.force_robotiq_gripper = self.declare_parameter("force_robotiq_gripper", False).value
 
         # ==================================================================
         # RTDE connections
@@ -122,7 +126,7 @@ class UR5RTDEBridge(Node):
         else:
             self.get_logger().info("RTDE IO disabled (use_rtde_io=false)")
 
-        # -- RobotiqGripper fallback --
+        # -- RobotiqGripper fallback (always try to initialize, even if RTDE IO is available) --
         self._init_robotiq_gripper_fallback()
 
         # ==================================================================
@@ -212,10 +216,11 @@ class UR5RTDEBridge(Node):
     # ======================================================================
 
     def _init_robotiq_gripper_fallback(self):
-        """Attempt to connect a RobotiqGripper as fallback when RTDE IO is unavailable."""
-        if self.rtde_io is not None:
-            self.get_logger().info("RTDE IO active — RobotiqGripper fallback skipped")
-            return
+        """Attempt to connect a RobotiqGripper as fallback when RTDE IO is unavailable.
+        
+        Note: RobotiqGripper is also initialized even when RTDE IO is available,
+        so it can be used as a fallback if RTDE IO commands don't work.
+        """
         if not self.use_robotiq_gripper:
             self.get_logger().info("RobotiqGripper fallback disabled (use_robotiq_gripper=false)")
             return
@@ -419,17 +424,21 @@ class UR5RTDEBridge(Node):
         # Determine open/close for the RTDE IO binary interface
         is_open = v > self.gripper_mid
 
-        # --- Try RTDE IO first ---
-        if self.rtde_io is not None:
+        # --- Try RTDE IO first (but allow fallback if RobotiqGripper is available) ---
+        rtde_io_success = False
+        if self.rtde_io is not None and not self.force_robotiq_gripper:
             try:
                 self.rtde_io.setToolDigitalOut(0, is_open)
                 self.get_logger().info(f"Gripper cmd: {v:.3f} -> Tool DO 0 = {is_open}")
-                return
+                rtde_io_success = True
+                # If RobotiqGripper is also available, log that RTDE IO was used
+                if self.robotiq_gripper is not None:
+                    self.get_logger().debug("RTDE IO used (RobotiqGripper available as fallback)")
             except Exception as e:
                 self.get_logger().warn(f"RTDE IO gripper command failed: {e}")
 
-        # --- Fall back to RobotiqGripper ---
-        if self.robotiq_gripper is not None:
+        # --- Fall back to RobotiqGripper if RTDE IO failed, not available, or forced ---
+        if (not rtde_io_success or self.force_robotiq_gripper) and self.robotiq_gripper is not None:
             try:
                 # Convert the command value to a 0–255 integer position.
                 # If hardware range is configured, normalize within that range first.

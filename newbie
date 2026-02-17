@@ -1,14 +1,40 @@
 # RFM venv + UR5 명령어 정리
 
 ## 0. gello_software 설치 (텔레오퍼레이션·데이터 수집)
-# 이미 설치됨: /home/lcw/RFM/gello_software (https://github.com/wuphilipp/gello_software)
+# 저장소: https://github.com/wuphilipp/gello_software
 # 가상환경: gello_software 전용 .venv (Python 3.10)
-cd /home/lcw/RFM/gello_software
-source .venv/bin/activate
 
-# UR 로봇 + 데이터 저장 인터페이스로 실행 (저장: s, 종료: q)
-# YAM이 아닌 경우: 먼저 로봇 노드 실행 후 run_env.py
-python experiments/run_env.py --agent=gello --use-save-interface
+# 0-1. gello_software가 없으면 클론 (RFM 루트에서)
+# git clone https://github.com/wuphilipp/gello_software /home/lcw/RFM/gello_software
+
+# 0-2. venv 없으면 생성 (gello_software 안에서)
+# cd /home/lcw/RFM/gello_software && python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+
+# 0-2b. 의존성 설치 (tyro 등 — ModuleNotFoundError 나면 실행)
+# cd /home/lcw/RFM/gello_software && source .venv/bin/activate && pip install -r requirements.txt
+
+# 0-2c. gello 패키지 에디터블 설치 (No module named 'gello' 나면 실행)
+# cd /home/lcw/RFM/gello_software && source .venv/bin/activate && pip install -e .
+
+# 0-2d. RFM .venv 쓸 때 Gello용 추가 패키지 (dynamixel_sdk 등 — ModuleNotFoundError 나면 실행)
+# cd /home/lcw/RFM && source .venv/bin/activate && pip install dynamixel_sdk
+
+# 0-2e. Gello 초기 팔이 어긋날 때 (오프셋 캘리브레이션)
+# 1) Gello를 원하는 "0 자세"에 맞춰 둔 뒤, gello_software에서:
+#    python scripts/gello_get_offset.py --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA2U0V8-if00-port0 --start-joints 0 0 0 0 0 0 --joint-signs 1 1 -1 1 1 1 --gripper
+# 2) 출력된 best offsets / gripper open,close 를 gello_software/gello/agents/gello_agent.py 의 FTA2U0V8 항목에 반영
+
+# --- 0-3. Gello 데이터 수집: 꼭 2단계 (서버 먼저, 그 다음 클라이언트) ---
+# run_env.py는 ZMQ 클라이언트라서, 6001 포트에서 대기하는 "로봇 서버"가 먼저 떠 있어야 함.
+
+cd /home/lcw/RFM/gello_software && source .venv/bin/activate && python experiments/run_env.py --agent=gello --use-save-interface
+
+# [2단계] 터미널 2 — Gello 데이터 수집 (저장: s, 종료: q)
+# 서버가 같은 PC면 --hostname 127.0.0.1, 서버가 192.168.0.43 이면 --hostname 192.168.0.43
+cd /home/lcw/RFM/gello_software && source .venv/bin/activate
+python experiments/run_env.py --agent=gello --use-save-interface --hostname 127.0.0.1
+# 서버가 다른 PC(예: 192.168.0.43)에 있으면:
+# python experiments/run_env.py --agent=gello --use-save-interface --hostname 192.168.0.43
 
 # YAM + YAML 설정인 경우 (데이터 저장 포함)
 # python experiments/launch_yaml.py --left-config-path configs/yam_passive.yaml --use-save-interface

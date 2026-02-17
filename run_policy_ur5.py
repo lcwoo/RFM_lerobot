@@ -325,17 +325,73 @@ class OctoObservationHistory:
 class RealSenseCamera:
     """Direct RealSense camera access via pyrealsense2."""
 
-    def __init__(self, width=640, height=480, fps=30):
+    def __init__(self, width=640, height=480, fps=30, max_retries=3):
         import pyrealsense2 as rs
 
-        self.pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)
-        self.pipeline.start(config)
-        # Discard initial auto-exposure frames
-        for _ in range(30):
-            self.pipeline.wait_for_frames()
-        logger.info(f"RealSense camera initialized ({width}x{height} @ {fps}fps)")
+        # Try to stop any existing pipelines first
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        for dev in devices:
+            try:
+                sensors = dev.query_sensors()
+                for sensor in sensors:
+                    sensor.stop()
+            except Exception:
+                pass
+
+        # Retry initialization
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                self.pipeline = rs.pipeline()
+                config = rs.config()
+                config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)
+                self.pipeline.start(config)
+                # Discard initial auto-exposure frames
+                for _ in range(30):
+                    self.pipeline.wait_for_frames()
+                logger.info(f"RealSense camera initialized ({width}x{height} @ {fps}fps)")
+                return
+            except RuntimeError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    logger.warning(f"Camera initialization attempt {attempt + 1} failed: {e}")
+                    logger.info("Waiting 2 seconds before retry...")
+                    time.sleep(2)
+                    # Try to clean up
+                    try:
+                        if hasattr(self, 'pipeline'):
+                            self.pipeline.stop()
+                    except Exception:
+                        pass
+                else:
+                    # Check for running processes that might be using the camera
+                    import subprocess
+                    try:
+                        result = subprocess.run(
+                            ["ps", "aux"], capture_output=True, text=True, timeout=2
+                        )
+                        realsense_procs = [
+                            line for line in result.stdout.split("\n")
+                            if "realsense2_camera_node" in line or "realsense" in line.lower()
+                        ]
+                        proc_info = ""
+                        if realsense_procs:
+                            proc_info = "\n\n다음 프로세스가 카메라를 사용 중일 수 있습니다:\n"
+                            proc_info += "\n".join(realsense_procs[:3])
+                            proc_info += "\n\n해결 방법:\n"
+                            proc_info += "1. 다른 사용자가 실행한 프로세스를 종료하세요:\n"
+                            proc_info += "   sudo kill <PID>  # 또는 해당 사용자에게 요청\n"
+                            proc_info += "2. 또는 ROS2 카메라 토픽을 사용하세요:\n"
+                            proc_info += "   --use-ros2-camera --camera-topic /wrist_cam/camera/color/image_raw\n"
+                    except Exception:
+                        pass
+                    
+                    raise RuntimeError(
+                        f"RealSense 카메라 초기화 실패 ({max_retries}회 시도).\n"
+                        f"마지막 오류: {e}\n"
+                        f"다른 프로세스가 카메라를 사용 중일 수 있습니다.{proc_info}"
+                    ) from e
 
     def capture(self) -> np.ndarray:
         """Capture a single RGB frame. Returns (H, W, 3) uint8 array."""

@@ -1,4 +1,5 @@
 import glob
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -22,12 +23,14 @@ def print_color(*args, color=None, attrs=(), **kwargs):
 
 @dataclass
 class Args:
+    """ZMQ 로봇 서버에 연결. 로봇이 다른 PC면 --hostname IP 로 지정."""
+
     agent: str = "none"
     robot_port: int = 6001
     wrist_camera_port: int = 5000
     base_camera_port: int = 5001
-    hostname: str = "127.0.0.1"
-    robot_type: str = None  # only needed for quest agent or spacemouse agent
+    hostname: str = os.environ.get("GELLO_ROBOT_HOST", "127.0.0.1")
+    robot_type: Optional[str] = None  # only needed for quest agent or spacemouse agent
     hz: int = 100
     start_joints: Optional[Tuple[float, ...]] = None
 
@@ -124,11 +127,15 @@ def main(args):
         if args.agent == "gello":
             gello_port = args.gello_port
             if gello_port is None:
-                usb_ports = glob.glob("/dev/serial/by-id/*")
-                print(f"Found {len(usb_ports)} ports")
+                usb_ports = sorted(glob.glob("/dev/serial/by-id/*"))
+                print(f"Found {len(usb_ports)} serial port(s): {usb_ports}")
                 if len(usb_ports) > 0:
                     gello_port = usb_ports[0]
-                    print(f"using port {gello_port}")
+                    print(f"Using Gello serial port: {gello_port}")
+                    if len(usb_ports) > 1:
+                        print(
+                            "  (여러 포트 있음 — 다른 장치 쓰려면 --gello-port /dev/serial/by-id/... 지정)"
+                        )
                 else:
                     raise ValueError(
                         "No gello port found, please specify one or plug in gello"
@@ -138,21 +145,31 @@ def main(args):
                 "port": gello_port,
                 "start_joints": args.start_joints,
             }
-            if args.start_joints is None:
-                reset_joints = np.deg2rad(
-                    [0, -90, 90, -90, -90, 0, 0]
-                )  # Change this to your own reset joints
-            else:
+            # Arm 고정 초기 자세(6축) + 그리퍼 0(닫힘) → 로봇을 먼저 여기로 보냄. 그 다음 Gello를 "지금 로봇 자세"에 캘리브레이션.
+            if args.start_joints is not None:
                 reset_joints = np.array(args.start_joints)
-
+            else:
+                reset_joints = np.array(
+                    list(np.deg2rad([0, -90, 90, -90, -90, 0])) + [0.0]
+                )  # 6 arm (rad) + 1 gripper [0,1]
             curr_joints = env.get_obs()["joint_positions"]
             if reset_joints.shape == curr_joints.shape:
-                max_delta = (np.abs(curr_joints - reset_joints)).max()
-                steps = min(int(max_delta / 0.01), 100)
-
-                for jnt in np.linspace(curr_joints, reset_joints, steps):
+                max_delta = np.abs(curr_joints - reset_joints).max()
+                steps = max(50, min(int(max_delta / 0.008), 600))
+                step_sleep = 0.02
+                print(
+                    f"Moving robot to fixed start pose (arm 0,-90,90,-90,-90,0 deg, gripper closed) — steps={steps}, ~{steps*step_sleep:.1f}s"
+                )
+                for i, jnt in enumerate(
+                    np.linspace(curr_joints, reset_joints, steps)
+                ):
                     env.step(jnt)
-                    time.sleep(0.001)
+                    time.sleep(step_sleep)
+                    if (i + 1) % 50 == 0:
+                        print(f"  move {i + 1}/{steps}...")
+                # 로봇이 reset_joints에 도달한 시점에, Gello를 "이 로봇 자세"에 캘리브레이션 (start_joints 전달 → DynamixelRobot이 오프셋 조정)
+                agent_cfg["start_joints"] = reset_joints
+                print("  → Gello will be calibrated to current robot pose (no need to hold Gello to match).")
         elif args.agent == "quest":
             agent_cfg = {
                 "_target_": "gello.agents.quest_agent.SingleArmQuestAgent",
@@ -176,8 +193,8 @@ def main(args):
             raise ValueError("Invalid agent name")
 
     agent = instantiate_from_dict(agent_cfg)
-    # going to start position
-    print("Going to start position")
+    # going to start position — 로봇은 이미 고정 초기 자세에 있음. Gello가 그 자세에 맞는지 확인.
+    print("Going to start position (Gello를 로봇과 같은 자세에 맞춰 두었는지 확인)")
     start_pos = agent.act(env.get_obs())
     obs = env.get_obs()
     joints = obs["joint_positions"]
@@ -199,6 +216,7 @@ def main(args):
             print(
                 f"joint[{i}]: \t delta: {delta:4.3f} , leader: \t{joint:4.3f} , follower: \t{current_j:4.3f}"
             )
+        print("  → 로봇은 고정 초기 자세에 있음. Gello를 그 자세에 맞춰 다시 실행하세요.")
         return
 
     print(f"Start pos: {len(start_pos)}", f"Joints: {len(joints)}")

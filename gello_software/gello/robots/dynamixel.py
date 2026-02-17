@@ -79,25 +79,34 @@ class DynamixelRobot(Robot):
         self._alpha = 0.99
 
         if start_joints is not None:
-            # loop through all joints and add +- 2pi to the joint offsets to get the closest to start joints
+            # Calibrate: set offsets so that current reading is reported as start_joints (e.g. robot pose).
+            # (raw - new_offset)*sign = start_joint  =>  new_offset = raw - start_joint*sign = old_offset + (current_joint - start_joint)*sign
             new_joint_offsets = []
             current_joints = self.get_joint_state()
             assert current_joints.shape == start_joints.shape
+            start_joints_calib = np.array(start_joints)
             if gripper_config is not None:
-                current_joints = current_joints[:-1]
-                start_joints = start_joints[:-1]
+                current_joints_arm = current_joints[:-1].copy()
+                start_joints_arm = start_joints_calib[:-1].copy()
+            else:
+                current_joints_arm = current_joints
+                start_joints_arm = start_joints_calib
             for idx, (c_joint, s_joint, joint_offset) in enumerate(
-                zip(current_joints, start_joints, self._joint_offsets)
+                zip(current_joints_arm, start_joints_arm, self._joint_offsets)
             ):
                 new_joint_offsets.append(
-                    np.pi
-                    * 2
-                    * np.round((-s_joint + c_joint) / (2 * np.pi))
-                    * self._joint_signs[idx]
-                    + joint_offset
+                    joint_offset
+                    + (float(c_joint) - float(s_joint)) * self._joint_signs[idx]
                 )
             if gripper_config is not None:
-                new_joint_offsets.append(self._joint_offsets[-1])
+                # Gripper: output is [0,1] from (pos[-1]-open)/(close-open). Calibrate so current -> start_joints[-1].
+                c_g = current_joints[-1]
+                s_g = start_joints_calib[-1]
+                span = self.gripper_open_close[1] - self.gripper_open_close[0]
+                new_joint_offsets.append(
+                    self._joint_offsets[-1]
+                    + (float(c_g) - float(s_g)) * span * self._joint_signs[-1]
+                )
             self._joint_offsets = np.array(new_joint_offsets)
 
     def num_dofs(self) -> int:

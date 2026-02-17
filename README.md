@@ -98,3 +98,58 @@ python run_policy_ur5.py --model-type octo --checkpoint <체크포인트경로> 
 | 변환 | `scripts/convert_gello_to_lerobot.py` 로 Gello → LeRobot Parquet |
 | 학습 | LeRobot/Octo 등으로 체크포인트 학습 |
 | 실행 | `run_policy_ur5.py` + `ur5_rtde_bridge.py` 로 학습된 정책으로 UR5 구동 |
+
+---
+
+## Gello 데이터 수집 (상세)
+
+### 실행 순서 (2단계)
+
+**1단계 — 터미널 1: 로봇 서버 실행**
+```bash
+cd /home/lcw/RFM/gello_software && source .venv/bin/activate
+python experiments/launch_nodes.py --robot ur --robot_ip 192.168.0.43 --hostname 0.0.0.0 --robot-port 6001
+```
+
+**2단계 — 터미널 2: Gello 데이터 수집**
+```bash
+cd /home/lcw/RFM/gello_software && source .venv/bin/activate
+python experiments/run_env.py --agent=gello --use-save-interface --hostname 127.0.0.1
+```
+
+- **저장**: `s` 키
+- **종료**: `q` 키
+- 데이터는 `gello_software/data/` 또는 `~/bc_data/` 에 저장됨
+
+### Gello 초기화 및 캘리브레이션
+
+- **로봇 초기 자세**: `run_env.py` 실행 시 로봇이 **고정 자세** `[0, -90, 90, -90, -90, 0]` deg + 그리퍼 닫힘으로 이동
+- **Gello 캘리브레이션**: 로봇이 초기 자세에 도달한 시점에, **Gello의 현재 읽기를 "로봇 자세"로 매핑** (사용자가 Gello를 맞출 필요 없음)
+- **Gello 포트 설정**: 시리얼 포트 자동 감지. 여러 포트가 있으면 `--gello-port /dev/serial/by-id/...` 로 지정
+
+### Gello 오프셋 캘리브레이션 (초기 설정)
+
+새로운 Gello 장치를 사용할 때는 오프셋을 캘리브레이션해야 합니다:
+
+```bash
+cd /home/lcw/RFM/gello_software && source .venv/bin/activate
+python scripts/gello_get_offset.py \
+  --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA2U0V8-if00-port0 \
+  --start-joints 0 0 0 0 0 0 \
+  --joint-signs 1 1 -1 1 1 1 \
+  --gripper
+```
+
+출력된 `best offsets`와 `gripper open/close` 값을 `gello_software/gello/agents/gello_agent.py`의 `PORT_CONFIG_MAP`에 추가.
+
+### 주요 수정 사항
+
+- **`run_env.py`**: 로봇을 고정 초기 자세로 이동 후, Gello를 그 자세에 자동 캘리브레이션
+- **`dynamixel.py`**: `start_joints` 전달 시 오프셋을 "현재 읽기 = start_joints"가 되도록 정확히 조정 (기존 2π 래핑 방식 개선)
+- **`gello_agent.py`**: FTA2U0V8 포트 설정 추가 (캘리브레이션 결과 반영)
+
+---
+
+## 참고 문서
+
+- **`newbie`**: RFM 프로젝트 실행 명령어 정리 (venv, UR5 브리지, Gello 데이터 수집, 데이터셋 변환, 학습 등)

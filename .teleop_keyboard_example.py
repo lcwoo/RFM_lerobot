@@ -15,7 +15,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from math_utils import rotvec_to_mat, mat_to_quat
+from rfm.utils.math import rotvec_to_mat, mat_to_quat
 
 class TeleopKeyboard(Node):
     def __init__(self):

@@ -117,20 +117,32 @@ def build_lerobot_features() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def pkl_frame_to_lerobot_frame(pkl_data: dict, task: str = "gello") -> dict:
+def pkl_frame_to_lerobot_frame(pkl_data: dict, task: str = "gello", create_dummy_image: bool = False) -> dict:
     """Convert a single Gello .pkl frame into a LeRobot-compatible frame dict.
 
     Args:
         pkl_data: Raw data loaded from a Gello .pkl file.
         task: Language task description attached to every frame.
+        create_dummy_image: If True and wrist_rgb is missing, create a dummy black image.
 
     Returns:
         A dict ready to be passed to ``LeRobotDataset.add_frame()``.
     """
-    # Ensure RGB image is uint8 (Gello sometimes stores float [0, 1])
-    rgb = pkl_data["wrist_rgb"]
-    if rgb.dtype != np.uint8:
-        rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+    # Handle missing wrist_rgb: create dummy image if requested
+    if "wrist_rgb" not in pkl_data:
+        if create_dummy_image:
+            # Create a dummy black image (480, 640, 3) as uint8
+            rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+        else:
+            raise KeyError(
+                "wrist_rgb not found in pkl data. "
+                "Use --create-dummy-image to generate dummy images for image-less datasets."
+            )
+    else:
+        # Ensure RGB image is uint8 (Gello sometimes stores float [0, 1])
+        rgb = pkl_data["wrist_rgb"]
+        if rgb.dtype != np.uint8:
+            rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
 
     # Concatenate all proprioceptive signals into a single state vector
     state = np.concatenate([
@@ -279,6 +291,11 @@ def main():
         default=None,
         help="Limit the number of episodes to convert (useful for testing)",
     )
+    parser.add_argument(
+        "--create-dummy-image",
+        action="store_true",
+        help="Create dummy black images if wrist_rgb is missing from pkl files",
+    )
     args = parser.parse_args()
 
     input_root = args.input.resolve()
@@ -334,7 +351,7 @@ def main():
         for pkl_path in pkl_files:
             with open(pkl_path, "rb") as f:
                 pkl_data = pickle.load(f)
-            frame = pkl_frame_to_lerobot_frame(pkl_data, task=args.task)
+            frame = pkl_frame_to_lerobot_frame(pkl_data, task=args.task, create_dummy_image=args.create_dummy_image)
             dataset.add_frame(frame)
 
         dataset.save_episode()

@@ -1,5 +1,7 @@
 # RFM (Robot Foundation Models)
 
+![Project Overview](overview.png)
+
 Gello로 UR5를 움직여 **데이터셋을 수집**하고, **Parquet(LeRobot 포맷)으로 변환**할 수 있으며, 학습한 **체크포인트로 UR5를 움직이게** 할 수 있는 레포입니다.
 
 - **데이터 수집**: Gello로 UR5를 텔레오퍼레이션하며 데모를 기록
